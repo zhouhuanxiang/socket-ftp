@@ -14,9 +14,11 @@
 
 #include <arpa/inet.h>
 
-#define PORT "9034" // the port client will be connecting to
-
 #define MAXDATASIZE 516 // max number of bytes we can get at once
+#define FTP_BUF_SIZE 1024
+
+char serverPort[] = "34408";
+char serverIP[] = "127.0.0.1";
 
 enum ClientStatus{
 	None,
@@ -28,8 +30,7 @@ enum ClientStatus{
 };
 
 // get sockaddr, IPv4 or IPv6:
-void *get_in_addr(struct sockaddr *sa)
-{
+void *get_in_addr(struct sockaddr *sa){
 	if (sa->sa_family == AF_INET) {
 		return &(((struct sockaddr_in*)sa)->sin_addr);
 	}
@@ -94,13 +95,14 @@ void GetFileAddr(char* msg, char* fileIP, char* filePort){
 	sprintf(filePort, "%d", num1*256+num2);
 }
 
-void ClientRecvMsg(int sockfd, char* buf){
+int ClientRecvMsg(int sockfd, char* buf){
 	int nbytes;
 	if ((nbytes = recv(sockfd, buf, MAXDATASIZE-1, 0)) == -1) {
 	    perror("recv");
 	    exit(1);
 	}
 	buf[nbytes] = '\0';
+	return nbytes;
 }
 
 int ClientUserInputMsg(char* msg){
@@ -111,36 +113,29 @@ int ClientUserInputMsg(char* msg){
 	return length;
 }
 
-int main(int argc, char *argv[])
-{
-	int sockfd, nbytes;
-	int status = None;
-
-	char sendMsg[MAXDATASIZE];
-	char recvMsg[MAXDATASIZE];
-	char filePort[MAXDATASIZE];
-	char fileIP[MAXDATASIZE];
-
+int ClientCreateRecvFileDescriptor(char* port, void* ip){
 	struct addrinfo hints, *servinfo, *p;
+	int sockfd;
 	int rv;
+	int yes=1;        // for setsockopt() SO_REUSEADDR, below
 	char s[INET6_ADDRSTRLEN];
 
+	// printf("%s:%s\n", ip, port);
+
+	// get us a socket and bind it
 	memset(&hints, 0, sizeof hints);
 	hints.ai_family = AF_UNSPEC;
 	hints.ai_socktype = SOCK_STREAM;
-
-	if ((rv = getaddrinfo("127.0.0.1", PORT, &hints, &servinfo)) != 0) {
+	if ((rv = getaddrinfo(ip, port, &hints, &servinfo)) != 0) {
 		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
 		return 1;
 	}
-
 	// loop through all the results and connect to the first we can
 	for(p = servinfo; p != NULL; p = p->ai_next) {
 		if ((sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1) {
 			perror("client: socket");
 			continue;
 		}
-
 		if (connect(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
 			perror("client: connect");
 			close(sockfd);
@@ -148,7 +143,6 @@ int main(int argc, char *argv[])
 		}
 		break;
 	}
-
 	if (p == NULL) {
 		fprintf(stderr, "client: failed to connect\n");
 		return 2;
@@ -159,16 +153,116 @@ int main(int argc, char *argv[])
 
 	freeaddrinfo(servinfo); // all done with this structure
 
+	return sockfd;
+}
+
+int ClinetCreateSendFileDescriptor(char* port, void* ip){
+	struct addrinfo hints, *ai, *p;
+	int serverfd;
+	int rv;
+	int yes=1;        // for setsockopt() SO_REUSEADDR, below
+
+	// get us a socket and bind it
+	memset(&hints, 0, sizeof hints);
+	hints.ai_family = AF_UNSPEC;
+	hints.ai_socktype = SOCK_STREAM;
+	if(ip == NULL)
+		hints.ai_flags = AI_PASSIVE;
+	if ((rv = getaddrinfo(ip, port, &hints, &ai)) != 0) {
+		fprintf(stderr, "selectserver: %s\n", gai_strerror(rv));
+		exit(1);
+	}
+
+	for(p = ai; p != NULL; p = p->ai_next) {
+		serverfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+		if (serverfd < 0) {
+			continue;
+		}
+
+		// lose the pesky "address already in use" error message
+		setsockopt(serverfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int));
+
+		if (bind(serverfd, p->ai_addr, p->ai_addrlen) < 0) {
+			close(serverfd);
+			continue;
+		}
+		break;
+	}
+
+	// if we got here, it means we didn't get bound
+	if (p == NULL) {
+		fprintf(stderr, "selectserver: failed to bind\n");
+		exit(2);
+	}
+
+	freeaddrinfo(ai); // all done with this
+
+    if (listen(serverfd, 10) == -1) {
+        perror("listen");
+        exit(3);
+    }
+
+	return serverfd;
+}
+
+
+void ClientSendFile(FILE* pfile, int transfd){
+
+
+}
+
+void ClientRecvFile(FILE* fp, int soc){
+	char buffer[FTP_BUF_SIZE];
+	bzero(buffer, FTP_BUF_SIZE);
+	int file_block_length = 0;
+	while ((file_block_length = ClientRecvMsg(soc, buffer)) > 0)
+	{
+		if (file_block_length < 0)
+		{
+			printf("Recieve Data From Client Failed!\n");
+		}
+		printf("# %d\n", file_block_length);
+		int write_length = fwrite(buffer, sizeof(char), file_block_length, fp);
+		if (write_length < file_block_length){
+			printf("Write Failed\n");
+			break;
+		}
+		bzero(buffer, FTP_BUF_SIZE);
+	}
+	fclose(fp);
+	printf("Transfer Finished\n");
+}
+
+int main(int argc, char *argv[])
+{
+	int sockfd, nbytes;
+	int filefd, thisfd;
+	int status = None;
+
+	char sendMsg[MAXDATASIZE];
+	char recvMsg[MAXDATASIZE];
+	char filePort[MAXDATASIZE];
+	char fileIP[MAXDATASIZE];
+
+	sockfd = ClientCreateRecvFileDescriptor(serverPort, serverIP);
+
 	ClientRecvMsg(sockfd, recvMsg);
 	for(;;){
-		printf("############\n");
 		char req[32], mask[32];
+
+		printf("############\n");
 		ClientUserInputMsg(sendMsg);
 		if(strlen(sendMsg) == 0){
 			continue;
 		}
-		send(sockfd, sendMsg, strlen(sendMsg), 0);
 		GetSendMsgReq(sendMsg, req);
+		if(strcmp(req, "PORT") == 0){
+			status = Port;
+			GetFileAddr(sendMsg, fileIP, filePort);
+			thisfd = ClinetCreateSendFileDescriptor(filePort, fileIP);
+		}
+		send(sockfd, sendMsg, strlen(sendMsg), 0);
+
 		recvMsg[0] = '\0';
 		ClientRecvMsg(sockfd, recvMsg);
 		strncpy(mask, recvMsg, 3);
@@ -180,17 +274,53 @@ int main(int argc, char *argv[])
 		else if(strcmp(req, "PASS")==0 && strcmp(mask, "230")==0){
 			status = Login;
 		}
-		else if(strcmp(req, "PORT")==0 && strcmp(mask, "200")==0){
-			status = Port;
-			GetFileAddr(sendMsg, fileIP, filePort);
-		}
 		else if(strcmp(req, "PASV")==0 && strcmp(mask, "227")==0){
 			status = Pasv;
 			GetFileAddr(recvMsg, fileIP, filePort);
-			// printf("%s:%s\n", fileIP, filePort);
 		}
-		printf("status: %d\n", status);
-		printf("%s\n", recvMsg);
+		else if(strcmp(req, "RETR") == 0){
+			printf("%s", recvMsg);
+			if(strcmp(mask, "150") != 0){
+				status = Login;
+				continue;
+			}
+			else{
+				char filename[64];
+				FILE* pfile;
+
+				strncpy(filename, sendMsg+5, strlen(sendMsg)-5);
+				filename[strlen(sendMsg)-5] = '\0';
+				pfile = fopen(filename, "w+");
+			    if(pfile == NULL){
+					ClientRecvMsg(sockfd, recvMsg);
+					close(filefd);
+					char badmsg[] = "create file failed\r\n";
+					printf("%s\n", badmsg);
+					continue;
+				}
+
+				if(status == Pasv){
+					filefd = ClientCreateRecvFileDescriptor(filePort, fileIP);
+				}
+				else{
+					struct sockaddr_storage remoteaddr; // client address
+				    socklen_t addrlen = sizeof remoteaddr;
+					filefd = accept(thisfd,(struct sockaddr *)&remoteaddr,&addrlen);
+				}
+				ClientRecvFile(pfile, filefd);
+				close(filefd);
+				if(status == Port){
+					close(thisfd);
+				}
+				ClientRecvMsg(sockfd, recvMsg);
+				status = Login;
+			}
+		}
+		else if(strcmp(req, "STOR") == 0){
+
+		}
+		// printf("status: %d\n", status);
+		printf("%s", recvMsg);
 	}
 
 	close(sockfd);
