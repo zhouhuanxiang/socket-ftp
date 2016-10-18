@@ -14,10 +14,9 @@
 
 #include <arpa/inet.h>
 
-#define MAXDATASIZE 516 // max number of bytes we can get at once
-#define FTP_BUF_SIZE 1024
+#define BUF_SIZE 1024
 
-char serverPort[] = "34408";
+char serverPort[] = "21";
 char serverIP[] = "127.0.0.1";
 
 enum ClientStatus{
@@ -43,6 +42,7 @@ void *get_in_addr(struct sockaddr *sa){
 	return &(((struct sockaddr_in6*)sa)->sin6_addr);
 }
 
+//get first three capital char of return message form server
 void GetSendMsgReq(char* msg, char* req){
 	int length  = strlen(msg);
 	int i = 0;
@@ -62,6 +62,9 @@ void GetSendMsgReq(char* msg, char* req){
 	}
 }
 
+//for PASV mode
+//server deliver a ',' type address
+//extract ip('.' type) and port(char type)
 void GetFileAddr(char* msg, char* fileIP, char* filePort){
 	int i, j;
 	int count = 0;
@@ -100,9 +103,11 @@ void GetFileAddr(char* msg, char* fileIP, char* filePort){
 	sprintf(filePort, "%d", num1*256+num2);
 }
 
+//receiev msg form server
+//from sockfd and store in buf
 int ClientRecvMsg(int sockfd, char* buf){
 	int nbytes;
-	if ((nbytes = recv(sockfd, buf, MAXDATASIZE-1, 0)) == -1) {
+	if ((nbytes = recv(sockfd, buf, BUF_SIZE-1, 0)) == -1) {
 	    perror("recv");
 	    exit(1);
 	}
@@ -110,21 +115,25 @@ int ClientRecvMsg(int sockfd, char* buf){
 	return nbytes;
 }
 
+//store client input in msg
 int ClientUserInputMsg(char* msg){
 	int length;
-	fgets(msg, MAXDATASIZE, stdin);
+	fgets(msg, BUF_SIZE, stdin);
 	length = strlen(msg);
 	msg[length-1] = '\0';
 	return length;
 }
 
+//bind to a server socket or open a new socket
+//bind     fdMode = BindMode
+//connect  fdMode = ConnectMode
 int ClientCreateFileDescriptor(char* port, void* ip, int fdMode){
 	struct addrinfo hints, *servinfo, *p;
 	int sockfd;
 	int rv;
-	int yes=1;        // for setsockopt() SO_REUSEADDR, below
+	int yes=1;
 
-	// get us a socket and bind it
+	// get us a socket and bind it or connect to it
 	memset(&hints, 0, sizeof hints);
 	hints.ai_family = AF_UNSPEC;
 	hints.ai_socktype = SOCK_STREAM;
@@ -162,68 +171,90 @@ int ClientCreateFileDescriptor(char* port, void* ip, int fdMode){
         perror("listen");
         exit(3);
     }
-
 	return sockfd;
 }
 
+//send file to server socket
+//from file *pfile
+void ClientSendFile(FILE* pfile, int filefd){
+	long length;
+	long readlength = 1;
+	char buf[BUF_SIZE];
 
-void ClientSendFile(FILE* pfile, int transfd){
+    fseek(pfile, 0, SEEK_END);
+    length = ftell(pfile);
+    fseek(pfile, 0, SEEK_SET);
 
+    while ((readlength > 0) && (length > 0)){
+        readlength = fread(buf, sizeof(char), BUF_SIZE-1, pfile);
 
+        if (readlength > 0){
+			buf[readlength] = '\0';
+            send(filefd, buf, readlength, 0);
+            length -= readlength;
+        }
+        printf("# %ld\n", readlength);
+    }
 }
 
-void ClientRecvFile(FILE* fp, int transfd){
-	char buffer[FTP_BUF_SIZE];
-	bzero(buffer, FTP_BUF_SIZE);
+//recv file from server socket
+//store it in *pfile
+void ClientRecvFile(FILE* pfile, int filefd){
+	char buffer[BUF_SIZE];
+	bzero(buffer, BUF_SIZE);
 	int file_block_length = 0;
-	while ((file_block_length = ClientRecvMsg(transfd, buffer)) > 0)
+	while ((file_block_length = ClientRecvMsg(filefd, buffer)) > 0)
 	{
 		if (file_block_length < 0)
 		{
 			printf("Recieve Data From Client Failed!\n");
 		}
 		printf("# %d\n", file_block_length);
-		int write_length = fwrite(buffer, sizeof(char), file_block_length, fp);
+		int write_length = fwrite(buffer, sizeof(char), file_block_length, pfile);
 		if (write_length < file_block_length){
 			printf("Write Failed\n");
 			break;
 		}
-		bzero(buffer, FTP_BUF_SIZE);
+		bzero(buffer, BUF_SIZE);
 	}
-	fclose(fp);
-	printf("Transfer Finished\n");
 }
 
 int main(int argc, char *argv[])
 {
-	int sockfd, nbytes;
-	int filefd, thisfd;
+	int sockfd;
+	int filefd, portfd;//filefd : file transfer
+					   //portfd : port mode
 	int status = None;
 
-	char sendMsg[MAXDATASIZE];
-	char recvMsg[MAXDATASIZE];
-	char filePort[MAXDATASIZE];
-	char fileIP[MAXDATASIZE];
+	char sendMsg[BUF_SIZE];
+	char recvMsg[BUF_SIZE];
+	char filePort[BUF_SIZE];
+	char fileIP[BUF_SIZE];
 
+	//bind to server & get its fd in sockfd
+	//only for send req and recv msg
 	sockfd = ClientCreateFileDescriptor(serverPort, serverIP, ConnectMode);
 
+	//recv greeting msg from server
 	ClientRecvMsg(sockfd, recvMsg);
 	for(;;){
 		char req[32], mask[32];
 
 		printf("############\n");
 		ClientUserInputMsg(sendMsg);
+		//empty input
 		if(strlen(sendMsg) == 0){
 			continue;
 		}
+		//get req
 		GetSendMsgReq(sendMsg, req);
 		if(strcmp(req, "PORT") == 0){
 			status = Port;
 			GetFileAddr(sendMsg, fileIP, filePort);
-			thisfd = ClientCreateFileDescriptor(filePort, fileIP, BindMode);
+			portfd = ClientCreateFileDescriptor(filePort, fileIP, BindMode);
 		}
 		send(sockfd, sendMsg, strlen(sendMsg), 0);
-
+		//get mask
 		recvMsg[0] = '\0';
 		ClientRecvMsg(sockfd, recvMsg);
 		strncpy(mask, recvMsg, 3);
@@ -239,7 +270,7 @@ int main(int argc, char *argv[])
 			status = Pasv;
 			GetFileAddr(recvMsg, fileIP, filePort);
 		}
-		else if(strcmp(req, "RETR") == 0){
+		else if(strcmp(req, "RETR") == 0 || strcmp(req, "STOR") == 0){
 			printf("%s", recvMsg);
 			if(strcmp(mask, "150") != 0){
 				status = Login;
@@ -251,27 +282,39 @@ int main(int argc, char *argv[])
 
 				strncpy(filename, sendMsg+5, strlen(sendMsg)-5);
 				filename[strlen(sendMsg)-5] = '\0';
-				pfile = fopen(filename, "w+");
+
+				if(strcmp(req, "RETR") == 0){
+					pfile = fopen(filename, "w+");
+				}
+				else if(strcmp(req, "STOR") == 0){
+					pfile = fopen(filename, "rb+");
+				}
 			    if(pfile == NULL){
 					ClientRecvMsg(sockfd, recvMsg);
-					close(filefd);
-					char badmsg[] = "create file failed\r\n";
+					char badmsg[] = "file handle failed\r\n";
 					printf("%s\n", badmsg);
 					continue;
 				}
-
+				//pasv mode, connect to aimed socket first
 				if(status == Pasv){
 					filefd = ClientCreateFileDescriptor(filePort, fileIP, ConnectMode);
 				}
+				//oterwise, accept the connect request from server
 				else{
-					struct sockaddr_storage remoteaddr; // client address
+					struct sockaddr_storage remoteaddr;
 				    socklen_t addrlen = sizeof remoteaddr;
-					filefd = accept(thisfd,(struct sockaddr *)&remoteaddr,&addrlen);
+					filefd = accept(portfd,(struct sockaddr *)&remoteaddr,&addrlen);
 				}
-				ClientRecvFile(pfile, filefd);
+				if(strcmp(req, "RETR") == 0){
+					ClientRecvFile(pfile, filefd);
+				}
+				else if(strcmp(req, "STOR") == 0){
+					ClientSendFile(pfile, filefd);
+				}
+				fclose(pfile);
 				close(filefd);
 				if(status == Port){
-					close(thisfd);
+					close(portfd);
 				}
 				ClientRecvMsg(sockfd, recvMsg);
 				status = Login;
@@ -280,11 +323,9 @@ int main(int argc, char *argv[])
 		else if(strcmp(req, "STOR") == 0){
 
 		}
-		// printf("status: %d\n", status);
 		printf("%s", recvMsg);
 	}
 
 	close(sockfd);
-
 	return 0;
 }
