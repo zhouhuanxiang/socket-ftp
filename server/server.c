@@ -11,10 +11,11 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <errno.h>
 #include <time.h>
 
 
-#define PORT "21"   // port we're listening on
+#define PORT 21111   // port we're listening on
 #define MAX_FD 50
 #define MAX_CLIENT 10
 #define BUF_SIZE 1024
@@ -35,11 +36,11 @@ enum CreateFdMode{
 };
 int clientStatus[MAX_FD];
 char fileIP[MAX_FD][16];
-char filePort[MAX_FD][16];
+int filePort[MAX_FD];
 char fileName[MAX_FD][32];
 int filefd[MAX_FD];
 
-char PATH[] = "/tmp";
+char PATH[] = "";
 
 // get sockaddr, IPv4 or IPv6:
 void *get_in_addr(struct sockaddr *sa){
@@ -119,7 +120,7 @@ int GetFileAddr(char* msg, int clientfd){
 	strncpy(buf2, msg+j+1, length-j-1);
 	buf2[j-i-1] = '\0';
 	num2 = strtol(buf2, NULL, 10);
-	sprintf(filePort[clientfd], "%d", num1*256+num2);
+	filePort[clientfd] = num1*256+num2;
 	return 0;
 }
 
@@ -128,7 +129,7 @@ int RandomPasvPort(int clientfd, char* num1, char* num2){
 	int r;
 	srand(time(NULL));
 	r = rand()%(65535-20000)+20000;
-	sprintf(filePort[clientfd], "%d", r);
+	filePort[clientfd] = r;
 	sprintf(num1, "%d", (r-r%256)/256);
 	sprintf(num2, "%d", r%256);
 	return r;
@@ -221,51 +222,41 @@ int ServerTransferFile(int clientfd, int clientfd2){
 }
 
 //as client
-int ServerCreateFileDescriptor(char* port, void* ip, int fdMode){
-	struct addrinfo hints, *servinfo, *p;
+int ServerCreateFileDescriptor(int port, void* ip, int fdMode){
 	int sockfd;
-	int rv;
-	int yes=1;        // for setsockopt() SO_REUSEADDR, below
-
-	// get us a socket and bind it
-	memset(&hints, 0, sizeof hints);
-	hints.ai_family = AF_UNSPEC;
-	hints.ai_socktype = SOCK_STREAM;
-	if(ip == NULL)
-		hints.ai_flags = AI_PASSIVE;
-	if ((rv = getaddrinfo(ip, port, &hints, &servinfo)) != 0) {
-		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
-		return 1;
-	}
-	// loop through all the results and connect to the first we can
-	for(p = servinfo; p != NULL; p = p->ai_next) {
-		if ((sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1) {
-			perror("client: socket");
-			continue;
-		}
-		if (fdMode == ConnectMode &&  connect(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
-			perror("client: connect");
-			close(sockfd);
-			continue;
-		}
-		if (fdMode == BindMode && bind(sockfd, p->ai_addr, p->ai_addrlen) < 0) {
-			close(sockfd);
-			continue;
-		}
-		break;
-	}
-	if (p == NULL) {
-		fprintf(stderr, "client: failed to connect\n");
-		return 2;
+	struct sockaddr_in addr;
+	if ((sockfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) == -1) {
+		printf("Error socket(): %s(%d)\n", strerror(errno), errno);
+		return -1;
 	}
 
-	freeaddrinfo(servinfo); // all done with this structure
+	memset(&addr, 0, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(port);
+	if(ip == NULL || fdMode == BindMode){
+		addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
-	if (fdMode == BindMode && listen(sockfd, 10) == -1) {
-        perror("listen");
-        exit(3);
-    }
+		if (bind(sockfd, (struct sockaddr*)&addr, sizeof(addr)) == -1) {
+			printf("Error bind(): %s(%d)\n", strerror(errno), errno);
+			return -1;
+		}
 
+		if (listen(sockfd, 10) == -1) {
+			printf("Error listen(): %s(%d)\n", strerror(errno), errno);
+			return -1;
+		}
+	}
+	else{
+		if (inet_pton(AF_INET, ip, &addr.sin_addr) < 0) {
+			printf("Error inet_pton(): %s(%d)\n", strerror(errno), errno);
+			return -1;
+		}
+
+		if (connect(sockfd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+			printf("Error connect(): %s(%d)\n", strerror(errno), errno);
+			return -1;
+		}
+	}
 	return sockfd;
 }
 
