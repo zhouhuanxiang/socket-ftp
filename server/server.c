@@ -27,6 +27,10 @@ enum ClientStatus{
 	File,
     Retr
 };
+enum CreateFdMode{
+	ConnectMode,
+	BindMode
+};
 int clientStatus[100];
 char fileIP[100][16];
 char filePort[100][16];
@@ -35,8 +39,7 @@ int filefd[100];
 
 char PATH[] = "";
 
-int ServerCreateSendFileDescriptor(char* port, void* ip);
-int ServerCreateRecvFileDescriptor(char* port, void* ip);
+int ServerCreateFileDescriptor(char* port, void* ip, int fdMode);
 
 // get sockaddr, IPv4 or IPv6:
 void *get_in_addr(struct sockaddr *sa){
@@ -229,7 +232,7 @@ void ServerHandleMsg(int clientfd, char* buf, int nbytes){
 			fileIP[clientfd][0] = '\0';
 			strcat(fileIP[clientfd], "127.0.0.1");
 
-			filefd[clientfd] = ServerCreateSendFileDescriptor(filePort[clientfd], NULL);
+			filefd[clientfd] = ServerCreateFileDescriptor(filePort[clientfd], NULL, BindMode);
             clientStatus[filefd[clientfd]] = File;
             printf("open file socket %d\n", filefd[clientfd]);
             if(originfd != 0){
@@ -264,7 +267,7 @@ void ServerHandleMsg(int clientfd, char* buf, int nbytes){
 
             if(clientStatus[clientfd] == Port){
 
-                int clientfd2 = ServerCreateRecvFileDescriptor(filePort[clientfd], fileIP[clientfd]);
+                int clientfd2 = ServerCreateFileDescriptor(filePort[clientfd], fileIP[clientfd], ConnectMode);
 
                 if(ServerRetrSendFile(clientfd, clientfd2) != -1){
                     close(clientfd2);
@@ -287,14 +290,11 @@ void ServerHandleMsg(int clientfd, char* buf, int nbytes){
 	}
 }
 
-int ServerCreateSendFileDescriptor(char* port, void* ip){
-	struct addrinfo hints, *ai, *p;
-	int serverfd;
+int ServerCreateFileDescriptor(char* port, void* ip, int fdMode){
+	struct addrinfo hints, *servinfo, *p;
+	int sockfd;
 	int rv;
 	int yes=1;        // for setsockopt() SO_REUSEADDR, below
-	//char ipstr[64];
-
-    // printf("%s:%s\n", ip, port);
 
 	// get us a socket and bind it
 	memset(&hints, 0, sizeof hints);
@@ -302,59 +302,6 @@ int ServerCreateSendFileDescriptor(char* port, void* ip){
 	hints.ai_socktype = SOCK_STREAM;
 	if(ip == NULL)
 		hints.ai_flags = AI_PASSIVE;
-	if ((rv = getaddrinfo(ip, port, &hints, &ai)) != 0) {
-		fprintf(stderr, "selectserver: %s\n", gai_strerror(rv));
-		exit(1);
-	}
-
-	for(p = ai; p != NULL; p = p->ai_next) {
-		serverfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
-		if (serverfd < 0) {
-			continue;
-		}
-
-		// lose the pesky "address already in use" error message
-		setsockopt(serverfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int));
-
-		if (bind(serverfd, p->ai_addr, p->ai_addrlen) < 0) {
-			close(serverfd);
-			continue;
-		}
-
-		//strcpy(ipstr, inet_ntoa(((struct sockaddr_in *)p->ai_addr)->sin_addr));
-		//inet_ntop(p->ai_family, &(((struct sockaddr_in *)p->ai_addr)->sin_addr), ipstr, sizeof(char*));
-	    //printf("%s\n", ipstr);
-		break;
-	}
-
-	// if we got here, it means we didn't get bound
-	if (p == NULL) {
-		fprintf(stderr, "selectserver: failed to bind\n");
-		exit(2);
-	}
-
-	freeaddrinfo(ai); // all done with this
-
-    if (listen(serverfd, 10) == -1) {
-        perror("listen");
-        exit(3);
-    }
-
-	return serverfd;
-}
-
-
-int ServerCreateRecvFileDescriptor(char* port, void* ip){
-	struct addrinfo hints, *servinfo, *p;
-	int sockfd;
-	int rv;
-	int yes=1;        // for setsockopt() SO_REUSEADDR, below
-	char s[INET6_ADDRSTRLEN];
-
-	// get us a socket and bind it
-	memset(&hints, 0, sizeof hints);
-	hints.ai_family = AF_UNSPEC;
-	hints.ai_socktype = SOCK_STREAM;
 	if ((rv = getaddrinfo(ip, port, &hints, &servinfo)) != 0) {
 		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
 		return 1;
@@ -365,8 +312,12 @@ int ServerCreateRecvFileDescriptor(char* port, void* ip){
 			perror("client: socket");
 			continue;
 		}
-		if (connect(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
+		if (fdMode == ConnectMode &&  connect(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
 			perror("client: connect");
+			close(sockfd);
+			continue;
+		}
+		if (fdMode == BindMode && bind(sockfd, p->ai_addr, p->ai_addrlen) < 0) {
 			close(sockfd);
 			continue;
 		}
@@ -377,10 +328,12 @@ int ServerCreateRecvFileDescriptor(char* port, void* ip){
 		return 2;
 	}
 
-	inet_ntop(p->ai_family, get_in_addr((struct sockaddr *)p->ai_addr), s, sizeof s);
-	printf("client: connecting to %s\n", s);
-
 	freeaddrinfo(servinfo); // all done with this structure
+
+	if (fdMode == BindMode && listen(sockfd, 10) == -1) {
+        perror("listen");
+        exit(3);
+    }
 
 	return sockfd;
 }
@@ -410,7 +363,7 @@ int main(void){
     FD_ZERO(&read_fds);
 
 	//
-	listener = ServerCreateSendFileDescriptor(PORT, NULL);
+	listener = ServerCreateFileDescriptor(PORT, NULL, BindMode);
 
     // add the listener to the master set
     FD_SET(listener, &master);

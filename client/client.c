@@ -29,6 +29,11 @@ enum ClientStatus{
 	Pasv
 };
 
+enum CreateFdMode{
+	ConnectMode,
+	BindMode
+};
+
 // get sockaddr, IPv4 or IPv6:
 void *get_in_addr(struct sockaddr *sa){
 	if (sa->sa_family == AF_INET) {
@@ -113,19 +118,18 @@ int ClientUserInputMsg(char* msg){
 	return length;
 }
 
-int ClientCreateRecvFileDescriptor(char* port, void* ip){
+int ClientCreateFileDescriptor(char* port, void* ip, int fdMode){
 	struct addrinfo hints, *servinfo, *p;
 	int sockfd;
 	int rv;
 	int yes=1;        // for setsockopt() SO_REUSEADDR, below
-	char s[INET6_ADDRSTRLEN];
-
-	// printf("%s:%s\n", ip, port);
 
 	// get us a socket and bind it
 	memset(&hints, 0, sizeof hints);
 	hints.ai_family = AF_UNSPEC;
 	hints.ai_socktype = SOCK_STREAM;
+	if(ip == NULL)
+		hints.ai_flags = AI_PASSIVE;
 	if ((rv = getaddrinfo(ip, port, &hints, &servinfo)) != 0) {
 		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
 		return 1;
@@ -136,8 +140,12 @@ int ClientCreateRecvFileDescriptor(char* port, void* ip){
 			perror("client: socket");
 			continue;
 		}
-		if (connect(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
+		if (fdMode == ConnectMode &&  connect(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
 			perror("client: connect");
+			close(sockfd);
+			continue;
+		}
+		if (fdMode == BindMode && bind(sockfd, p->ai_addr, p->ai_addrlen) < 0) {
 			close(sockfd);
 			continue;
 		}
@@ -148,61 +156,14 @@ int ClientCreateRecvFileDescriptor(char* port, void* ip){
 		return 2;
 	}
 
-	inet_ntop(p->ai_family, get_in_addr((struct sockaddr *)p->ai_addr), s, sizeof s);
-	printf("client: connecting to %s\n", s);
-
 	freeaddrinfo(servinfo); // all done with this structure
 
-	return sockfd;
-}
-
-int ClinetCreateSendFileDescriptor(char* port, void* ip){
-	struct addrinfo hints, *ai, *p;
-	int serverfd;
-	int rv;
-	int yes=1;        // for setsockopt() SO_REUSEADDR, below
-
-	// get us a socket and bind it
-	memset(&hints, 0, sizeof hints);
-	hints.ai_family = AF_UNSPEC;
-	hints.ai_socktype = SOCK_STREAM;
-	if(ip == NULL)
-		hints.ai_flags = AI_PASSIVE;
-	if ((rv = getaddrinfo(ip, port, &hints, &ai)) != 0) {
-		fprintf(stderr, "selectserver: %s\n", gai_strerror(rv));
-		exit(1);
-	}
-
-	for(p = ai; p != NULL; p = p->ai_next) {
-		serverfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
-		if (serverfd < 0) {
-			continue;
-		}
-
-		// lose the pesky "address already in use" error message
-		setsockopt(serverfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int));
-
-		if (bind(serverfd, p->ai_addr, p->ai_addrlen) < 0) {
-			close(serverfd);
-			continue;
-		}
-		break;
-	}
-
-	// if we got here, it means we didn't get bound
-	if (p == NULL) {
-		fprintf(stderr, "selectserver: failed to bind\n");
-		exit(2);
-	}
-
-	freeaddrinfo(ai); // all done with this
-
-    if (listen(serverfd, 10) == -1) {
+	if (fdMode == BindMode && listen(sockfd, 10) == -1) {
         perror("listen");
         exit(3);
     }
 
-	return serverfd;
+	return sockfd;
 }
 
 
@@ -211,11 +172,11 @@ void ClientSendFile(FILE* pfile, int transfd){
 
 }
 
-void ClientRecvFile(FILE* fp, int soc){
+void ClientRecvFile(FILE* fp, int transfd){
 	char buffer[FTP_BUF_SIZE];
 	bzero(buffer, FTP_BUF_SIZE);
 	int file_block_length = 0;
-	while ((file_block_length = ClientRecvMsg(soc, buffer)) > 0)
+	while ((file_block_length = ClientRecvMsg(transfd, buffer)) > 0)
 	{
 		if (file_block_length < 0)
 		{
@@ -244,7 +205,7 @@ int main(int argc, char *argv[])
 	char filePort[MAXDATASIZE];
 	char fileIP[MAXDATASIZE];
 
-	sockfd = ClientCreateRecvFileDescriptor(serverPort, serverIP);
+	sockfd = ClientCreateFileDescriptor(serverPort, serverIP, ConnectMode);
 
 	ClientRecvMsg(sockfd, recvMsg);
 	for(;;){
@@ -259,7 +220,7 @@ int main(int argc, char *argv[])
 		if(strcmp(req, "PORT") == 0){
 			status = Port;
 			GetFileAddr(sendMsg, fileIP, filePort);
-			thisfd = ClinetCreateSendFileDescriptor(filePort, fileIP);
+			thisfd = ClientCreateFileDescriptor(filePort, fileIP, BindMode);
 		}
 		send(sockfd, sendMsg, strlen(sendMsg), 0);
 
@@ -300,7 +261,7 @@ int main(int argc, char *argv[])
 				}
 
 				if(status == Pasv){
-					filefd = ClientCreateRecvFileDescriptor(filePort, fileIP);
+					filefd = ClientCreateFileDescriptor(filePort, fileIP, ConnectMode);
 				}
 				else{
 					struct sockaddr_storage remoteaddr; // client address
