@@ -11,10 +11,9 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <errno.h>
 #include <time.h>
 
-
-#define PORT "21"   // port we're listening on
 #define MAX_FD 50
 #define MAX_CLIENT 10
 #define BUF_SIZE 1024
@@ -34,12 +33,14 @@ enum CreateFdMode{
 	BindMode
 };
 int clientStatus[MAX_FD];
-char fileIP[MAX_FD][16];
+char fileIP[MAX_FD][32];
 char filePort[MAX_FD][16];
-char fileName[MAX_FD][32];
+char fileName[MAX_FD][BUF_SIZE];
+int pasvfd[MAX_FD];
 int filefd[MAX_FD];
 
-char PATH[] = "/tmp";
+char PATH[64] = "../tmp/";
+char PORT[64] = "21";
 
 // get sockaddr, IPv4 or IPv6:
 void *get_in_addr(struct sockaddr *sa){
@@ -59,14 +60,11 @@ void GetRecvMsgReq(char* msg, char* req){
 	}
 	else{
 		while(msg[i]>='A' && msg[i]<='Z' && i < length)
+		{
+			req[i] = msg[i];
 			++i;
-		if((i < length && msg[i] == ' ') || i == length){
-			strncpy(req, msg, i);
-			req[i] = '\0';
 		}
-		else{
-			req[0] = '\0';
-		}
+		req[i] = '\0';
 	}
 }
 
@@ -117,7 +115,7 @@ int GetFileAddr(char* msg, int clientfd){
 	buf1[j-i-1] = '\0';
 	num1 = strtol(buf1, NULL, 10);
 	strncpy(buf2, msg+j+1, length-j-1);
-	buf2[j-i-1] = '\0';
+	buf2[length-j-1] = '\0';
 	num2 = strtol(buf2, NULL, 10);
 	sprintf(filePort[clientfd], "%d", num1*256+num2);
 	return 0;
@@ -128,7 +126,7 @@ int RandomPasvPort(int clientfd, char* num1, char* num2){
 	int r;
 	srand(time(NULL));
 	r = rand()%(65535-20000)+20000;
-	sprintf(filePort[clientfd], "%d", r);
+	sprintf(filePort[clientfd], "%d",r);
 	sprintf(num1, "%d", (r-r%256)/256);
 	sprintf(num2, "%d", r%256);
 	return r;
@@ -154,7 +152,6 @@ int ServerSendFile(FILE* pfile, int filefd){
             send(filefd, buf, readlength, 0);
             length -= readlength;
         }
-        printf("# %ld\n", readlength);
     }
 	return 1;
 }
@@ -170,7 +167,6 @@ int ServerRecvFile(FILE* pfile, int filefd){
 		{
 			printf("Recieve Data From Client Failed!\n");
 		}
-		printf("# %d\n", file_block_length);
 		int write_length = fwrite(buffer, sizeof(char), file_block_length, pfile);
 		if (write_length < file_block_length){
 			printf("Write Failed\n");
@@ -184,22 +180,22 @@ int ServerRecvFile(FILE* pfile, int filefd){
 int ServerTransferFile(int clientfd, int clientfd2){
     char filename[128];
     char msg[] = "226 RETR success\r\n";
+
     FILE* pfile;
 
-    if(clientfd2 == -1){
-        return -1;
-    }
 	if(clientStatus[clientfd] == Retr){
 		pfile = fopen(fileName[clientfd], "rb+");
 	}
 	else if(clientStatus[clientfd] == Stor){
 		pfile = fopen(fileName[clientfd], "w+");
 	}
+
     if(pfile == NULL){
-        char badmsg[] = "451 file handle failed\r\n";
+		char badmsg[] = "451 file handle failed\r\n";
         send(clientfd, badmsg, strlen(badmsg), 0);
         return -1;
     }
+
     if((clientStatus[clientfd] == Retr && ServerSendFile(pfile, clientfd2) == -1) ||
 	   (clientStatus[clientfd] == Stor && ServerRecvFile(pfile, clientfd2) == -1)){
         char badmsg[32];
@@ -225,9 +221,9 @@ int ServerCreateFileDescriptor(char* port, void* ip, int fdMode){
 	struct addrinfo hints, *servinfo, *p;
 	int sockfd;
 	int rv;
-	int yes=1;        // for setsockopt() SO_REUSEADDR, below
+	int yes=1;
 
-	// get us a socket and bind it
+	// get us a socket and bind it or connect to it
 	memset(&hints, 0, sizeof hints);
 	hints.ai_family = AF_UNSPEC;
 	hints.ai_socktype = SOCK_STREAM;
@@ -243,6 +239,8 @@ int ServerCreateFileDescriptor(char* port, void* ip, int fdMode){
 			perror("client: socket");
 			continue;
 		}
+		// lose the pesky "address already in use" error message
+    	setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int));
 		if (fdMode == ConnectMode &&  connect(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
 			perror("client: connect");
 			close(sockfd);
@@ -265,17 +263,16 @@ int ServerCreateFileDescriptor(char* port, void* ip, int fdMode){
         perror("listen");
         exit(3);
     }
-
 	return sockfd;
 }
 
-void ServerHandleMsg(int clientfd, char* buf, int nbytes){
+int ServerHandleMsg(int clientfd, char* buf){
 	char req[16];
 	GetRecvMsgReq(buf, req);
 	if(strlen(req) == 0){
 		char msg[] = "503 command format is \'REQUEST optional_parameter\'\r\n";
 		send(clientfd, msg, strlen(msg), 0);
-		return;
+		return 0;
 	}
 
 	switch(clientStatus[clientfd]){
@@ -319,15 +316,15 @@ void ServerHandleMsg(int clientfd, char* buf, int nbytes){
 			char num1[16];
 			char num2[16];
 			char msg[BUF_SIZE];
-            int originfd = filefd[clientfd];
+            int originfd = pasvfd[clientfd];
 
 			RandomPasvPort(clientfd, num1, num2);
 			fileIP[clientfd][0] = '\0';
 			strcat(fileIP[clientfd], "127.0.0.1");
 
-			filefd[clientfd] = ServerCreateFileDescriptor(filePort[clientfd], NULL, BindMode);
-            clientStatus[filefd[clientfd]] = File;
-            printf("open file socket %d\n", filefd[clientfd]);
+			pasvfd[clientfd] = ServerCreateFileDescriptor(filePort[clientfd], NULL, BindMode);
+            clientStatus[pasvfd[clientfd]] = File;
+            printf("open file socket %d\n", pasvfd[clientfd]);
             if(originfd != 0){
                 close(originfd);
                 clientStatus[originfd] = None;
@@ -335,48 +332,72 @@ void ServerHandleMsg(int clientfd, char* buf, int nbytes){
             }
 
 			msg[0] = '\0';
-			strcat(msg, "227 Pasv success 127,0,0,1,");
+			strcat(msg, "227 Pasv success (127,0,0,1,");
 			strcat(msg, num1);
 			strcat(msg, ",");
 			strcat(msg, num2);
-			strcat(msg, "\r\n\0");
+			strcat(msg, ")\r\n\0");
 			send(clientfd, msg, strlen(msg), 0);
 			clientStatus[clientfd] = Pasv;
 		}
 		else if(strcmp(req, "RETR") == 0 || strcmp(req, "STOR") == 0){
-			char msg[32];
+			int clientfd2;
 			int originStatus = clientStatus[clientfd];
 			if(clientStatus[clientfd] != Pasv && clientStatus[clientfd] != Port){
 				char badmsg[] = "425 PORT or PASV first\r\n";
 				send(clientfd, badmsg, strlen(badmsg), 0);
-				return;
+				return 0;
 			}
-			msg[0] = '\0';
+
 			if(strcmp(req, "RETR") == 0){
-				strcat(msg, "150 RETR starting...\r\n");
 				clientStatus[clientfd] = Retr;
 			}
 			else if(strcmp(req, "STOR") == 0){
-				strcat(msg, "150 STOR starting...\r\n");
 				clientStatus[clientfd] = Stor;
 			}
-			send(clientfd, msg, strlen(msg), 0);
 
-            fileName[clientfd][0] = '\0';
-            strncpy(fileName[clientfd], PATH, strlen(PATH));
-            fileName[clientfd][strlen(PATH)] = '\0';
-            strcat(fileName[clientfd], buf+5);
             if(originStatus == Port){
-                int clientfd2 = ServerCreateFileDescriptor(filePort[clientfd], fileIP[clientfd], ConnectMode);
-                if(ServerTransferFile(clientfd, clientfd2) != -1){
-                    close(clientfd2);
-                    clientStatus[clientfd] = Login;
-                }
+				char msg[] = "150 Opening BINARY mode data connection\r\n";
+				send(clientfd, msg, strlen(msg), 0);
+				clientfd2 = ServerCreateFileDescriptor(filePort[clientfd], fileIP[clientfd], ConnectMode);
             }
+			else{
+				clientfd2 = filefd[clientfd];
+			}
+
+			if(clientfd2 == -1){
+				char badmsg[] = "451 bad fd\r\n";
+		        send(clientfd, badmsg, strlen(badmsg), 0);
+		        return 0;
+		    }
+
+			fileName[clientfd][0] = '\0';
+            strcpy(fileName[clientfd], PATH);
+            strcat(fileName[clientfd], buf+5);
+
+			if(ServerTransferFile(clientfd, clientfd2) != -1){
+				close(clientfd2);
+				//send(clientfd, msg, strlen(msg), 0);
+			}
+			clientStatus[clientfd] = Login;
+
+			if(originStatus == Pasv){
+				return 1;
+			}
 		}
 		else if(strcmp(req, "SYST") == 0){
 			char msg[] = "215 UNIX Type: L8\r\n";
 			send(clientfd, msg, strlen(msg), 0);
+		}
+		else if(strcmp(req, "TYPE") == 0){
+			if(strcmp(buf, "TYPE I") == 0){
+				char msg[] = "200 Type set to I.\r\n";
+				send(clientfd, msg, strlen(msg), 0);
+			}
+			else{
+				char msg[] = "503 bad Type\r\n";
+				send(clientfd, msg, strlen(msg), 0);
+			}
 		}
         else{
             char msg[] = "503 Undefined request\r\n";
@@ -384,6 +405,7 @@ void ServerHandleMsg(int clientfd, char* buf, int nbytes){
         }
 		break;
 	}
+	return 0;
 }
 
 int main(int argc, char *argv[]){
@@ -400,9 +422,20 @@ int main(int argc, char *argv[]){
     int nbytes;
     int i, j;
 
+	for (i=1; i<argc; i++){
+		if (strcmp(argv[i], "-port") == 0 && i < (argc-1)){
+			strcpy(PORT, argv[i+1]);
+		}else if(strcmp(argv[i], "-root") == 0 && i < (argc-1)){
+			strcpy(PATH, argv[i+1]);
+			strcat(PATH, "/");
+		}
+	}
+
 	//initialize
 	for(i = 0; i < MAX_FD; i++){
 		clientStatus[i] = None; //set all fd status to none
+		filefd[i] = 0;
+		pasvfd[i] = 0;
 	}
     FD_ZERO(&master);    // clear the master and temp sets
     FD_ZERO(&read_fds);
@@ -440,21 +473,13 @@ int main(int argc, char *argv[]){
                     int clientfd2;
 
                     for(j = 0; j <= fdmax; ++j){
-                        if(filefd[j] == i){       //clienfd j is the caller of filefd i
+                        if(pasvfd[j] == i){       //clienfd j is the caller of filefd i
                             break;
                         }
                     }
-
-                    clientfd2 = accept(i, (struct sockaddr *)&remoteaddr, &addrlen);//clientfd j open a socket clientfd2
-																					//accept it
-                    if(ServerTransferFile(j, clientfd2) != -1){//transfer success, reset all to normal
-                        close(clientfd2);
-                        close(i);
-                        FD_CLR(i, &master);
-                        clientStatus[i] = None;
-                        filefd[j] = 0;
-                        clientStatus[j] = Login;
-                    }
+					char msg[] = "150 Opening BINARY mode data connection\r\n";
+					send(j, msg, strlen(msg), 0);
+					filefd[j] = accept(i, (struct sockaddr *)&remoteaddr, &addrlen);//clientfd j open a socket clientfd2
                 }
 				else {				  // handle data from a client
 					nbytes = ServerRecvMsg(i, buf);
@@ -468,22 +493,43 @@ int main(int argc, char *argv[]){
                         close(i);
                         FD_CLR(i, &master); // remove from master set
 						clientStatus[i] = None; // reset client status to none
-						if(clientStatus[i] == Pasv || clientStatus[i] == Retr){
-							close(filefd[i]);
-							FD_CLR(filefd[i], &master);
-							clientStatus[filefd[i]] = None;
-                            printf("close file socket %d\n", filefd[i]);
-							filefd[i] = 0;
+						if(pasvfd[i] != 0){
+							close(pasvfd[i]);
+							FD_CLR(pasvfd[i], &master);
+							clientStatus[pasvfd[i]] = None;
+                            printf("close file socket %d\n", pasvfd[i]);
+							pasvfd[i] = 0;
 						}
                     }
 					else if(clientStatus[i] != Retr && clientStatus[i] != Stor){
-						int originfd = filefd[i];
-						ServerHandleMsg(i, buf, nbytes);
-						if(clientStatus[i] == Pasv && originfd != filefd[i]){
-							FD_SET(filefd[i], &master);
-                            printf("fd set %d\n", filefd[i]);
-							if (filefd[i] > fdmax) {    // keep track of the max
-	                            fdmax = filefd[i];
+						int originfd = pasvfd[i];
+						buf[nbytes-2] = '\0';
+						if(strcmp(buf, "ABOR") == 0 || strcmp(buf, "QUIT") == 0){
+							char msg[] = "221 bye\r\n";
+							send(i, msg, strlen(msg), 0);
+							close(i);
+	                        FD_CLR(i, &master); // remove from master set
+							clientStatus[i] = None; // reset client status to none
+							if(pasvfd[i] != 0){
+								close(pasvfd[i]);
+								FD_CLR(pasvfd[i], &master);
+								clientStatus[pasvfd[i]] = None;
+	                            printf("close file socket %d\n", pasvfd[i]);
+								pasvfd[i] = 0;
+							}
+							continue;
+						}
+						if(ServerHandleMsg(i, buf)>0){
+	                        close(pasvfd[i]);
+	                        FD_CLR(pasvfd[i], &master);
+	                        clientStatus[pasvfd[i]] = None;
+	                        pasvfd[i] = 0;
+						}
+						if(clientStatus[i] == Pasv && originfd != pasvfd[i]){
+							FD_SET(pasvfd[i], &master);
+                            printf("fd set %d\n", pasvfd[i]);
+							if (pasvfd[i] > fdmax) {    // keep track of the max
+	                            fdmax = pasvfd[i];
 	                        }
 							if(originfd > 0){
 								FD_CLR(originfd, &master);

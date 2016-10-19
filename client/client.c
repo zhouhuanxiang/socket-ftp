@@ -16,7 +16,7 @@
 
 #define BUF_SIZE 1024
 
-char serverPort[] = "21";
+#define serverPort "21"
 char serverIP[] = "127.0.0.1";
 
 enum ClientStatus{
@@ -51,15 +51,32 @@ void GetSendMsgReq(char* msg, char* req){
 	}
 	else{
 		while(msg[i]>='A' && msg[i]<='Z' && i < length)
+		{
+			req[i] = msg[i];
 			++i;
-		if((i < length && msg[i] == ' ') || i == length){
-			strncpy(req, msg, i);
-			req[i] = '\0';
 		}
-		else{
-			req[0] = '\0';
-		}
+		req[i] = '\0';
 	}
+}
+
+//receiev msg form server
+//from sockfd and store in buf
+int ClientRecvMsg(int sockfd, char* buf){
+	int nbytes;
+	if ((nbytes = recv(sockfd, buf, BUF_SIZE-1, 0)) == -1) {
+	    perror("recv");
+	    exit(1);
+	}
+	buf[nbytes] = '\0';
+	return nbytes;
+}
+
+//store client input in msg
+int ClientUserInputMsg(char* msg){
+	int length;
+	fgets(msg, BUF_SIZE, stdin);
+	length = strlen(msg);
+	return (length-1);
 }
 
 //for PASV mode
@@ -103,27 +120,6 @@ void GetFileAddr(char* msg, char* fileIP, char* filePort){
 	sprintf(filePort, "%d", num1*256+num2);
 }
 
-//receiev msg form server
-//from sockfd and store in buf
-int ClientRecvMsg(int sockfd, char* buf){
-	int nbytes;
-	if ((nbytes = recv(sockfd, buf, BUF_SIZE-1, 0)) == -1) {
-	    perror("recv");
-	    exit(1);
-	}
-	buf[nbytes] = '\0';
-	return nbytes;
-}
-
-//store client input in msg
-int ClientUserInputMsg(char* msg){
-	int length;
-	fgets(msg, BUF_SIZE, stdin);
-	length = strlen(msg);
-	msg[length-1] = '\0';
-	return length;
-}
-
 //bind to a server socket or open a new socket
 //bind     fdMode = BindMode
 //connect  fdMode = ConnectMode
@@ -149,6 +145,8 @@ int ClientCreateFileDescriptor(char* port, void* ip, int fdMode){
 			perror("client: socket");
 			continue;
 		}
+		// lose the pesky "address already in use" error message
+    	setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int));
 		if (fdMode == ConnectMode &&  connect(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
 			perror("client: connect");
 			close(sockfd);
@@ -193,7 +191,6 @@ void ClientSendFile(FILE* pfile, int filefd){
             send(filefd, buf, readlength, 0);
             length -= readlength;
         }
-        printf("# %ld\n", readlength);
     }
 }
 
@@ -209,7 +206,6 @@ void ClientRecvFile(FILE* pfile, int filefd){
 		{
 			printf("Recieve Data From Client Failed!\n");
 		}
-		printf("# %d\n", file_block_length);
 		int write_length = fwrite(buffer, sizeof(char), file_block_length, pfile);
 		if (write_length < file_block_length){
 			printf("Write Failed\n");
@@ -234,18 +230,21 @@ int main(int argc, char *argv[])
 	//bind to server & get its fd in sockfd
 	//only for send req and recv msg
 	sockfd = ClientCreateFileDescriptor(serverPort, serverIP, ConnectMode);
-
 	//recv greeting msg from server
 	ClientRecvMsg(sockfd, recvMsg);
+	printf("%s", recvMsg);
 	for(;;){
 		char req[32], mask[32];
 
-		printf("############\n");
 		ClientUserInputMsg(sendMsg);
 		//empty input
 		if(strlen(sendMsg) == 0){
 			continue;
 		}
+		int length = strlen(sendMsg);
+		sendMsg[length-1] = '\r';
+		sendMsg[length] = '\n';
+		sendMsg[length+1] = '\0';
 		//get req
 		GetSendMsgReq(sendMsg, req);
 		if(strcmp(req, "PORT") == 0){
@@ -253,12 +252,27 @@ int main(int argc, char *argv[])
 			GetFileAddr(sendMsg, fileIP, filePort);
 			portfd = ClientCreateFileDescriptor(filePort, fileIP, BindMode);
 		}
-		send(sockfd, sendMsg, strlen(sendMsg), 0);
-		//get mask
+		
+		if((strcmp(req, "RETR")==0 || strcmp(req, "STOR")==0) && status == Pasv){
+			filefd = ClientCreateFileDescriptor(filePort, fileIP, ConnectMode);
+		}
+		else{
+			send(sockfd, sendMsg, strlen(sendMsg), 0);
+		}
+		if(strcmp(req, "ABOR") == 0 || strcmp(req, "QUIT") == 0){
+			return 1;
+		}
+
 		recvMsg[0] = '\0';
 		ClientRecvMsg(sockfd, recvMsg);
-		strncpy(mask, recvMsg, 3);
-		mask[3] = '\0';
+		if(recvMsg[2] == ' '){
+			strncpy(mask, recvMsg, 2);
+			mask[2] = '\0';
+		}
+		else{
+			strncpy(mask, recvMsg, 3);
+			mask[3] = '\0';
+		}
 
 		if(strcmp(req, "USER")==0 && strcmp(mask, "331")==0){
 			status = NotLogin;
@@ -272,14 +286,13 @@ int main(int argc, char *argv[])
 		}
 		else if(strcmp(req, "RETR") == 0 || strcmp(req, "STOR") == 0){
 			printf("%s", recvMsg);
-			if(strcmp(mask, "150") != 0){
+			if(strcmp(mask, "150") != 0 && strcmp(mask, "50") != 0){
 				status = Login;
 				continue;
 			}
 			else{
 				char filename[64];
 				FILE* pfile;
-
 				strncpy(filename, sendMsg+5, strlen(sendMsg)-5);
 				filename[strlen(sendMsg)-5] = '\0';
 
@@ -289,15 +302,9 @@ int main(int argc, char *argv[])
 				else if(strcmp(req, "STOR") == 0){
 					pfile = fopen(filename, "rb+");
 				}
-			    if(pfile == NULL){
-					ClientRecvMsg(sockfd, recvMsg);
-					char badmsg[] = "file handle failed\r\n";
-					printf("%s\n", badmsg);
-					continue;
-				}
 				//pasv mode, connect to aimed socket first
 				if(status == Pasv){
-					filefd = ClientCreateFileDescriptor(filePort, fileIP, ConnectMode);
+					send(sockfd, sendMsg, strlen(sendMsg), 0);
 				}
 				//oterwise, accept the connect request from server
 				else{
@@ -305,6 +312,7 @@ int main(int argc, char *argv[])
 				    socklen_t addrlen = sizeof remoteaddr;
 					filefd = accept(portfd,(struct sockaddr *)&remoteaddr,&addrlen);
 				}
+
 				if(strcmp(req, "RETR") == 0){
 					ClientRecvFile(pfile, filefd);
 				}
@@ -319,9 +327,6 @@ int main(int argc, char *argv[])
 				ClientRecvMsg(sockfd, recvMsg);
 				status = Login;
 			}
-		}
-		else if(strcmp(req, "STOR") == 0){
-
 		}
 		printf("%s", recvMsg);
 	}
