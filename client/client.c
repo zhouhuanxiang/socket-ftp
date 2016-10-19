@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <string.h>
 #include <netdb.h>
+#include <errno.h>
 #include <sys/types.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -16,7 +17,7 @@
 
 #define BUF_SIZE 1024
 
-char serverPort[] = "21";
+int serverPort = 21111;
 char serverIP[] = "127.0.0.1";
 
 enum ClientStatus{
@@ -65,7 +66,7 @@ void GetSendMsgReq(char* msg, char* req){
 //for PASV mode
 //server deliver a ',' type address
 //extract ip('.' type) and port(char type)
-void GetFileAddr(char* msg, char* fileIP, char* filePort){
+void GetFileAddr(char* msg, char* fileIP, int filePort){
 	int i, j;
 	int count = 0;
 	int length = strlen(msg);
@@ -100,7 +101,7 @@ void GetFileAddr(char* msg, char* fileIP, char* filePort){
 	strncpy(buf2, msg+j+1, length-j-1);
 	buf2[length-j-1] = '\0';
 	num2 = strtol(buf2, NULL, 10);
-	sprintf(filePort, "%d", num1*256+num2);
+	filePort = num1*256+num2;
 }
 
 //receiev msg form server
@@ -127,50 +128,40 @@ int ClientUserInputMsg(char* msg){
 //bind to a server socket or open a new socket
 //bind     fdMode = BindMode
 //connect  fdMode = ConnectMode
-int ClientCreateFileDescriptor(char* port, void* ip, int fdMode){
-	struct addrinfo hints, *servinfo, *p;
+int ClientCreateFileDescriptor(int port, void* ip, int fdMode){
 	int sockfd;
-	int rv;
-	int yes=1;
-
-	// get us a socket and bind it or connect to it
-	memset(&hints, 0, sizeof hints);
-	hints.ai_family = AF_UNSPEC;
-	hints.ai_socktype = SOCK_STREAM;
-	if(ip == NULL)
-		hints.ai_flags = AI_PASSIVE;
-	if ((rv = getaddrinfo(ip, port, &hints, &servinfo)) != 0) {
-		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
-		return 1;
-	}
-	// loop through all the results and connect to the first we can
-	for(p = servinfo; p != NULL; p = p->ai_next) {
-		if ((sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1) {
-			perror("client: socket");
-			continue;
-		}
-		if (fdMode == ConnectMode &&  connect(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
-			perror("client: connect");
-			close(sockfd);
-			continue;
-		}
-		if (fdMode == BindMode && bind(sockfd, p->ai_addr, p->ai_addrlen) < 0) {
-			close(sockfd);
-			continue;
-		}
-		break;
-	}
-	if (p == NULL) {
-		fprintf(stderr, "client: failed to connect\n");
-		return 2;
+	struct sockaddr_in addr;
+	if ((sockfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) == -1) {
+		printf("Error socket(): %s(%d)\n", strerror(errno), errno);
+		return -1;
 	}
 
-	freeaddrinfo(servinfo); // all done with this structure
+	memset(&addr, 0, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(port);
+	if(ip == NULL || fdMode == BindMode){
+		addr.sin_addr.s_addr = htonl(INADDR_ANY);
+		if (bind(sockfd, (struct sockaddr*)&addr, sizeof(addr)) == -1) {
+			printf("Error bind(): %s(%d)\n", strerror(errno), errno);
+			return -1;
+		}
 
-	if (fdMode == BindMode && listen(sockfd, 10) == -1) {
-        perror("listen");
-        exit(3);
-    }
+		if (listen(sockfd, 10) == -1) {
+			printf("Error listen(): %s(%d)\n", strerror(errno), errno);
+			return -1;
+		}
+	}
+	else{
+		if (inet_pton(AF_INET, ip, &addr.sin_addr) < 0) {
+			printf("Error inet_pton(): %s(%d)\n", strerror(errno), errno);
+			return -1;
+		}
+
+		if (connect(sockfd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+			printf("Error connect(): %s(%d)\n", strerror(errno), errno);
+			return -1;
+		}
+	}
 	return sockfd;
 }
 
@@ -228,7 +219,7 @@ int main(int argc, char *argv[])
 
 	char sendMsg[BUF_SIZE];
 	char recvMsg[BUF_SIZE];
-	char filePort[BUF_SIZE];
+	int filePort;
 	char fileIP[BUF_SIZE];
 
 	//bind to server & get its fd in sockfd
